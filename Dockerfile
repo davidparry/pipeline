@@ -1,55 +1,50 @@
-FROM ubuntu:16.04
+FROM node:11.10.0
 MAINTAINER David Parry
 
-# Install base dependencies
-RUN apt-get update \
-    && apt-get install -y \
-        software-properties-common \
-        build-essential \
-        wget \
-        xvfb \
-        curl \
-        git \
-        mercurial \
-        maven \
-        openjdk-8-jdk \
-        ant \
-        ssh-client \
-        unzip \
-        iputils-ping \
-    && rm -rf /var/lib/apt/lists/*
 
-# Install nvm with node and npm
-ENV NODE_VERSION=8.9.4 \
-    NVM_DIR=/root/.nvm \
-    NVM_VERSION=0.33.8
-
-RUN curl https://raw.githubusercontent.com/creationix/nvm/v$NVM_VERSION/install.sh | bash \
-    && . $NVM_DIR/nvm.sh \
-    && nvm install $NODE_VERSION \
-    && nvm alias default $NODE_VERSION \
-    && nvm use default
-
-# Set node path
-ENV NODE_PATH=$NVM_DIR/v$NODE_VERSION/lib/node_modules
-
-ENV JAVA_HOME=/usr/lib/jvm/java-8-openjdk-amd64
+RUN apt-get update && apt-get install -y --no-install-recommends \
+		bzip2 \
+		unzip \
+		xz-utils \
+	&& rm -rf /var/lib/apt/lists/*
 
 # Default to UTF-8 file.encoding
-ENV LANG=C.UTF-8 \
-    LC_ALL=C.UTF-8 \
-    LANGUAGE=C.UTF-8
+ENV LANG C.UTF-8
 
-# Xvfb provide an in-memory X-session for tests that require a GUI
-ENV DISPLAY=:99
+# add a simple script that can auto-detect the appropriate JAVA_HOME value
+# based on whether the JDK or only the JRE is installed
+RUN { \
+		echo '#!/bin/sh'; \
+		echo 'set -e'; \
+		echo; \
+		echo 'dirname "$(dirname "$(readlink -f "$(which javac || which java)")")"'; \
+	} > /usr/local/bin/docker-java-home \
+	&& chmod +x /usr/local/bin/docker-java-home
 
-# Set the path.
-ENV PATH=$NVM_DIR:$NVM_DIR/versions/node/v$NODE_VERSION/bin:$PATH
+# do some fancy footwork to create a JAVA_HOME that's cross-architecture-safe
+RUN ln -svT "/usr/lib/jvm/java-8-openjdk-$(dpkg --print-architecture)" /docker-java-home
+ENV JAVA_HOME /docker-java-home
 
-# Create dirs and users
-RUN mkdir -p /opt/atlassian/bitbucketci/agent/build \
-    && sed -i '/[ -z \"PS1\" ] && return/a\\ncase $- in\n*i*) ;;\n*) return;;\nesac' /root/.bashrc \
-    && useradd --create-home --shell /bin/bash --uid 1000 pipelines
+ENV JAVA_VERSION 8u181
+ENV JAVA_DEBIAN_VERSION 8u181-b13-2~deb9u1
 
-WORKDIR /opt/atlassian/bitbucketci/agent/build
-ENTRYPOINT /bin/bash
+RUN set -ex; \
+	\
+# deal with slim variants not having man page directories (which causes "update-alternatives" to fail)
+	if [ ! -d /usr/share/man/man1 ]; then \
+		mkdir -p /usr/share/man/man1; \
+	fi; \
+	\
+	apt-get update; \
+	apt-get install -y --no-install-recommends \
+		openjdk-8-jdk-headless="$JAVA_DEBIAN_VERSION" \
+	; \
+	rm -rf /var/lib/apt/lists/*; \
+	\
+# verify that "docker-java-home" returns what we expect
+	[ "$(readlink -f "$JAVA_HOME")" = "$(docker-java-home)" ]; \
+	\
+# update-alternatives so that future installs of other OpenJDK versions don't change /usr/bin/java
+	update-alternatives --get-selections | awk -v home="$(readlink -f "$JAVA_HOME")" 'index($3, home) == 1 { $2 = "manual"; print | "update-alternatives --set-selections" }'; \
+# ... and verify that it actually worked for one of the alternatives we care about
+update-alternatives --query java | grep -q 'Status: manual'
